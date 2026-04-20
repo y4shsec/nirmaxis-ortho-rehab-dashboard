@@ -24,13 +24,13 @@ export default function Sidebar({ type = "patient" }) {
   const nav       = type === "admin" ? adminNav : patientNav;
   const [hovered, setHovered]   = useState(null);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
+  // const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
 
-  useEffect(() => {
-    const handleResize = () => setIsMobile(window.innerWidth <= 768);
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
+  // useEffect(() => {
+  //   const handleResize = () => setIsMobile(window.innerWidth <= 768);
+  //   window.addEventListener("resize", handleResize);
+  //   return () => window.removeEventListener("resize", handleResize);
+  // }, []);
 
   // Close sidebar on route change (mobile)
   useEffect(() => {
