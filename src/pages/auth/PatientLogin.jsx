@@ -1,107 +1,68 @@
-import LoginLogo from './LoginLogo';
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { setupRecaptcha, sendOTP, verifyOTP } from "../../services/auth";
-import { useAuth } from "../../context/AuthContext";
+import { sendEmailOTP, verifyEmailOTP, patientLoginWithEmail } from "../../services/auth";
 import { doc, updateDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "../../services/firebase";
-
-// ── Reusable OTP box component ──
-function OTPInput({ value, onChange, onKeyDown, id, filled }) {
-  return (
-    <input
-      id={id}
-      type="tel"
-      inputMode="numeric"
-      maxLength={1}
-      value={value}
-      onChange={onChange}
-      onKeyDown={onKeyDown}
-      style={{
-        width: 48, height: 54,
-        textAlign: "center",
-        fontSize: 22, fontWeight: 700,
-        border: `2px solid ${filled ? "var(--teal)" : "var(--border)"}`,
-        borderRadius: 10, outline: "none",
-        background: filled ? "var(--teal-light)" : "white",
-        color: "var(--teal-dark)",
-        transition: "all 0.15s",
-      }}
-    />
-  );
-}
+import { useAuth } from "../../context/AuthContext";
+import LoginLogo from "./LoginLogo";
 
 export default function PatientLogin() {
-  const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-  const { user, role } = useAuth();
-  const recaptchaRef = useRef(false);
+  const navigate      = useNavigate();
+  const [searchParams]= useSearchParams();
+  const { user, role }= useAuth();
 
-  // "login" | "register" | "otp" | "forgot"
-  const [mode, setMode] = useState(
+  // "login" | "register" | "otp"
+  const [mode, setMode]       = useState(
     searchParams.get("signup") === "true" ? "register" : "login"
   );
-
-  const [phone, setPhone] = useState("");
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [otp, setOtp] = useState(["", "", "", "", "", ""]);
+  const [email,   setEmail]   = useState("");
+  const [name,    setName]    = useState("");
+  const [otp,     setOtp]     = useState(["","","","","",""]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [timer, setTimer] = useState(0);
-  const [otpPurpose, setOtpPurpose] = useState("login"); // "login" | "register"
+  const [error,   setError]   = useState("");
+  const [timer,   setTimer]   = useState(0);
+  const [otpMode, setOtpMode] = useState("login"); // which flow triggered OTP
 
   useEffect(() => {
     if (user && role === "patient") navigate("/dashboard");
-    if (user && role === "admin") navigate("/admin");
+    if (user && role === "admin")   navigate("/admin");
   }, [user, role, navigate]);
 
   useEffect(() => {
     if (timer <= 0) return;
-    const id = setInterval(() => setTimer((t) => t - 1), 1000);
+    const id = setInterval(() => setTimer(t => t - 1), 1000);
     return () => clearInterval(id);
   }, [timer]);
 
-  useEffect(() => {
-    if (!recaptchaRef.current) {
-      setupRecaptcha("recaptcha-anchor");
-      recaptchaRef.current = true;
-    }
-  }, []);
-
-  // ── Send OTP (login or register) ──
-  async function handleSendOTP(e, purpose = "login") {
+  // ── Send OTP ──
+  async function handleSendOTP(e, forMode = "login") {
     e.preventDefault();
     setError("");
 
-    const cleaned = phone.replace(/\s/g, "");
-    if (!/^[6-9]\d{9}$/.test(cleaned)) {
-      setError("Please enter a valid 10-digit Indian mobile number.");
+    const trimEmail = email.trim().toLowerCase();
+    if (!trimEmail || !trimEmail.includes("@")) {
+      setError("Please enter a valid email address.");
       return;
     }
-
-    if (purpose === "register" && !name.trim()) {
+    if (forMode === "register" && !name.trim()) {
       setError("Please enter your full name.");
       return;
     }
 
     setLoading(true);
     try {
-      await sendOTP("+91" + cleaned);
-      setOtpPurpose(purpose);
+      await sendEmailOTP(trimEmail);
+      setOtpMode(forMode);
       setMode("otp");
-      setTimer(30);
+      setTimer(60);
     } catch (err) {
-      console.error(err);
-      setError("Failed to send OTP. Please try again.");
-      recaptchaRef.current = false;
-      setupRecaptcha("recaptcha-anchor");
+      setError(err.message || "Failed to send OTP. Please try again.");
     } finally {
       setLoading(false);
     }
   }
 
-  // ── Verify OTP ──
+  // ── Verify OTP + login ──
   async function handleVerifyOTP(e) {
     e.preventDefault();
     setError("");
@@ -114,23 +75,24 @@ export default function PatientLogin() {
 
     setLoading(true);
     try {
-      const result = await verifyOTP(otpVal);
+      // Verify OTP in memory
+      verifyEmailOTP(email.trim().toLowerCase(), otpVal);
 
-      // If registering — update name + email in Firestore
-      if (otpPurpose === "register" && name.trim()) {
-        const userRef = doc(db, "users", result.uid);
-        await updateDoc(userRef, {
-          name: name.trim(),
-          email: email.trim(),
+      // Login / register with Firebase
+      const firebaseUser = await patientLoginWithEmail(email.trim().toLowerCase());
+
+      // If registering → save name
+      if (otpMode === "register" && name.trim()) {
+        await updateDoc(doc(db, "users", firebaseUser.uid), {
+          name:      name.trim(),
           updatedAt: serverTimestamp(),
         });
       }
 
       navigate("/dashboard");
     } catch (err) {
-      console.error(err);
-      setError("Invalid OTP. Please check and try again.");
-      setOtp(["", "", "", "", "", ""]);
+      setError(err.message || "Verification failed. Please try again.");
+      setOtp(["","","","","",""]);
       document.getElementById("otp-0")?.focus();
     } finally {
       setLoading(false);
@@ -145,314 +107,175 @@ export default function PatientLogin() {
     setOtp(next);
     if (val && i < 5) document.getElementById(`otp-${i + 1}`)?.focus();
   }
-
   function handleOtpKey(i, e) {
     if (e.key === "Backspace" && !otp[i] && i > 0)
       document.getElementById(`otp-${i - 1}`)?.focus();
   }
 
-  function resetToMode(m) {
+  function resetMode(m) {
     setError("");
-    setOtp(["", "", "", "", "", ""]);
-    recaptchaRef.current = false;
-    setTimeout(() => {
-      setupRecaptcha("recaptcha-anchor");
-      recaptchaRef.current = true;
-    }, 200);
+    setOtp(["","","","","",""]);
     setMode(m);
   }
 
-  // ── Shared styles ──
-  const inputStyle = {
-    width: "100%", padding: "11px 14px",
-    border: "1.5px solid var(--border)", borderRadius: 8,
-    fontSize: 14, color: "var(--text-dark)", background: "white",
-    outline: "none", fontFamily: "inherit",
-    transition: "border-color 0.2s",
+  const inp = {
+    width:"100%", padding:"11px 14px",
+    border:"1.5px solid var(--border)", borderRadius:8,
+    fontSize:14, color:"var(--text-dark)", background:"white",
+    outline:"none", fontFamily:"inherit", transition:"border-color 0.2s",
   };
-
-  const btnStyle = {
-    width: "100%", padding: "12px",
-    background: "var(--teal)", color: "white",
-    border: "none", borderRadius: 8,
-    fontSize: 15, fontWeight: 600,
+  const btnPrimary = {
+    width:"100%", padding:"12px",
+    background:"var(--teal)", color:"white",
+    border:"none", borderRadius:8,
+    fontSize:15, fontWeight:600,
     cursor: loading ? "not-allowed" : "pointer",
-    opacity: loading ? 0.7 : 1,
-    fontFamily: "inherit",
-    transition: "background 0.2s",
+    opacity: loading ? 0.7 : 1, fontFamily:"inherit",
   };
 
   return (
     <div className="auth-page">
-      {/* Hidden reCAPTCHA anchor */}
-      <div id="recaptcha-anchor" style={{ position: "absolute", bottom: 0, left: 0 }} />
-
-      <div className="auth-card" style={{ maxWidth: 440 }}>
-
-        {/* Logo */}
+      <div className="auth-card" style={{ maxWidth:440 }}>
         <LoginLogo subtitle="NEURO & ORTHO REHABILITATION" />
-        <div style={{ fontSize: 10, color: "var(--text-light)", letterSpacing: 2, marginTop: 2 }}>
-          NEURO & ORTHO REHABILITATION
-        </div>
 
-        {/* ════════ LOGIN MODE ════════ */}
+        {/* ── LOGIN ── */}
         {mode === "login" && (
           <>
-            <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--teal-dark)", marginBottom: 4 }}>
-              Welcome back
-            </h1>
-            <p style={{ fontSize: 14, color: "var(--text-mid)", marginBottom: 24 }}>
-              Enter your mobile number to continue
-            </p>
-
-            <form onSubmit={(e) => handleSendOTP(e, "login")}>
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ display: "block", fontSize: 13, fontWeight: 500, marginBottom: 6 }}>
-                  Mobile Number
-                </label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <div style={{
-                    padding: "11px 14px", border: "1.5px solid var(--border)",
-                    borderRadius: 8, background: "#f8f8f8",
-                    fontSize: 14, color: "var(--text-mid)", whiteSpace: "nowrap"
-                  }}>
-                    🇮🇳 +91
-                  </div>
-                  <input
-                    style={inputStyle}
-                    type="tel"
-                    placeholder="98765 43210"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
-                    maxLength={10}
-                    autoFocus
-                  />
-                </div>
+            <h1 style={{ fontSize:22, fontWeight:700, color:"var(--teal-dark)", marginBottom:4 }}>Welcome back</h1>
+            <p style={{ fontSize:14, color:"var(--text-mid)", marginBottom:24 }}>Enter your email to receive a login OTP</p>
+            <form onSubmit={e => handleSendOTP(e, "login")}>
+              <div style={{ marginBottom:16 }}>
+                <label style={{ display:"block", fontSize:13, fontWeight:500, marginBottom:6 }}>Email Address</label>
+                <input style={inp} type="email" placeholder="your@email.com"
+                  value={email} onChange={e => setEmail(e.target.value)} autoFocus required />
               </div>
-
-              {error && <p style={{ color: "var(--danger)", fontSize: 13, marginBottom: 12 }}>{error}</p>}
-
-              <button type="submit" style={btnStyle} disabled={loading}>
+              {error && <p style={{ color:"var(--danger)", fontSize:13, marginBottom:12 }}>{error}</p>}
+              <button style={btnPrimary} disabled={loading}>
                 {loading ? "Sending OTP..." : "Send OTP →"}
               </button>
             </form>
-
-            <div style={{ marginTop: 20, textAlign: "center", fontSize: 13 }}>
-              <span style={{ color: "var(--text-light)" }}>New patient? </span>
-              <button onClick={() => resetToMode("register")}
-                style={{ background: "none", border: "none", color: "var(--teal)", fontWeight: 600, cursor: "pointer", fontSize: 13 }}>
+            <div style={{ marginTop:20, textAlign:"center", fontSize:13 }}>
+              <span style={{ color:"var(--text-light)" }}>New patient? </span>
+              <button onClick={() => resetMode("register")}
+                style={{ background:"none", border:"none", color:"var(--teal)", fontWeight:600, cursor:"pointer", fontSize:13 }}>
                 Create account
               </button>
             </div>
-
-            <div style={{ textAlign: "center", marginTop: 10 }}>
-              <button onClick={() => resetToMode("forgot")}
-                style={{ background: "none", border: "none", color: "var(--text-light)", fontSize: 12, cursor: "pointer" }}>
-                Changed your number?
-              </button>
-            </div>
-
-            <div style={{ borderTop: "1px solid var(--border)", marginTop: 20, paddingTop: 16, textAlign: "center" }}>
-              <a href="/admin/login" style={{ fontSize: 12, color: "var(--text-light)" }}>
-                🔒 Admin / Staff Login
-              </a>
+            <div style={{ borderTop:"1px solid var(--border)", marginTop:20, paddingTop:16, textAlign:"center" }}>
+              <a href="/admin/login" style={{ fontSize:12, color:"var(--text-light)" }}>🔒 Admin / Staff Login</a>
             </div>
           </>
         )}
 
-        {/* ════════ REGISTER MODE ════════ */}
+        {/* ── REGISTER ── */}
         {mode === "register" && (
           <>
-            <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--teal-dark)", marginBottom: 4 }}>
-              Create Account
-            </h1>
-            <p style={{ fontSize: 14, color: "var(--text-mid)", marginBottom: 24 }}>
-              Join NIRMAXIS to track your recovery journey
-            </p>
-
-            <form onSubmit={(e) => handleSendOTP(e, "register")}>
-              <div style={{ marginBottom: 14 }}>
-                <label style={{ display: "block", fontSize: 13, fontWeight: 500, marginBottom: 6 }}>
-                  Full Name *
-                </label>
-                <input
-                  style={inputStyle}
-                  type="text"
-                  placeholder="Your full name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  required
-                  autoFocus
-                />
+            <h1 style={{ fontSize:22, fontWeight:700, color:"var(--teal-dark)", marginBottom:4 }}>Create Account</h1>
+            <p style={{ fontSize:14, color:"var(--text-mid)", marginBottom:24 }}>Join NIRMAXIS to track your recovery</p>
+            <form onSubmit={e => handleSendOTP(e, "register")}>
+              <div style={{ marginBottom:14 }}>
+                <label style={{ display:"block", fontSize:13, fontWeight:500, marginBottom:6 }}>Full Name *</label>
+                <input style={inp} type="text" placeholder="Your full name"
+                  value={name} onChange={e => setName(e.target.value)} autoFocus required />
               </div>
-
-              <div style={{ marginBottom: 14 }}>
-                <label style={{ display: "block", fontSize: 13, fontWeight: 500, marginBottom: 6 }}>
-                  Mobile Number *
-                </label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <div style={{
-                    padding: "11px 14px", border: "1.5px solid var(--border)",
-                    borderRadius: 8, background: "#f8f8f8",
-                    fontSize: 14, color: "var(--text-mid)", whiteSpace: "nowrap"
-                  }}>
-                    🇮🇳 +91
-                  </div>
-                  <input
-                    style={inputStyle}
-                    type="tel"
-                    placeholder="98765 43210"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
-                    maxLength={10}
-                  />
-                </div>
+              <div style={{ marginBottom:16 }}>
+                <label style={{ display:"block", fontSize:13, fontWeight:500, marginBottom:6 }}>Email Address *</label>
+                <input style={inp} type="email" placeholder="your@email.com"
+                  value={email} onChange={e => setEmail(e.target.value)} required />
               </div>
-
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ display: "block", fontSize: 13, fontWeight: 500, marginBottom: 6 }}>
-                  Email <span style={{ color: "var(--text-light)", fontWeight: 400 }}>(optional)</span>
-                </label>
-                <input
-                  style={inputStyle}
-                  type="email"
-                  placeholder="your@email.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                />
-              </div>
-
-              {error && <p style={{ color: "var(--danger)", fontSize: 13, marginBottom: 12 }}>{error}</p>}
-
-              <button type="submit" style={btnStyle} disabled={loading}>
+              {error && <p style={{ color:"var(--danger)", fontSize:13, marginBottom:12 }}>{error}</p>}
+              <button style={btnPrimary} disabled={loading}>
                 {loading ? "Sending OTP..." : "Continue →"}
               </button>
             </form>
-
-            <div style={{ marginTop: 20, textAlign: "center", fontSize: 13 }}>
-              <span style={{ color: "var(--text-light)" }}>Already have an account? </span>
-              <button onClick={() => resetToMode("login")}
-                style={{ background: "none", border: "none", color: "var(--teal)", fontWeight: 600, cursor: "pointer", fontSize: 13 }}>
+            <div style={{ marginTop:20, textAlign:"center", fontSize:13 }}>
+              <span style={{ color:"var(--text-light)" }}>Already have account? </span>
+              <button onClick={() => resetMode("login")}
+                style={{ background:"none", border:"none", color:"var(--teal)", fontWeight:600, cursor:"pointer", fontSize:13 }}>
                 Login
               </button>
             </div>
           </>
         )}
 
-        {/* ════════ OTP MODE ════════ */}
+        {/* ── OTP ── */}
         {mode === "otp" && (
           <>
-            <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--teal-dark)", marginBottom: 4 }}>
-              Verify OTP
-            </h1>
-            <p style={{ fontSize: 14, color: "var(--text-mid)", marginBottom: 24 }}>
-              6-digit OTP sent to{" "}
-              <strong style={{ color: "var(--teal-dark)" }}>+91 {phone}</strong>
+            <h1 style={{ fontSize:22, fontWeight:700, color:"var(--teal-dark)", marginBottom:4 }}>Check your email</h1>
+            <p style={{ fontSize:14, color:"var(--text-mid)", marginBottom:6 }}>
+              6-digit OTP sent to
+            </p>
+            <p style={{ fontSize:15, fontWeight:600, color:"var(--teal-dark)", marginBottom:24 }}>
+              {email}
             </p>
 
             <form onSubmit={handleVerifyOTP}>
-              <div style={{ marginBottom: 20 }}>
-                <label style={{ display: "block", fontSize: 13, fontWeight: 500, marginBottom: 10 }}>
-                  Enter OTP
-                </label>
-                <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+              <div style={{ marginBottom:20 }}>
+                <label style={{ display:"block", fontSize:13, fontWeight:500, marginBottom:10 }}>Enter OTP</label>
+                <div style={{ display:"flex", gap:8, justifyContent:"center" }}>
                   {otp.map((d, i) => (
-                    <OTPInput
-                      key={i} id={`otp-${i}`} value={d} filled={!!d}
-                      onChange={(e) => handleOtpChange(i, e.target.value)}
-                      onKeyDown={(e) => handleOtpKey(i, e)}
+                    <input
+                      key={i}
+                      id={`otp-${i}`}
+                      type="tel"
+                      inputMode="numeric"
+                      maxLength={1}
+                      value={d}
+                      onChange={e => handleOtpChange(i, e.target.value)}
+                      onKeyDown={e => handleOtpKey(i, e)}
+                      autoFocus={i === 0}
+                      style={{
+                        width:48, height:54,
+                        textAlign:"center",
+                        fontSize:22, fontWeight:700,
+                        border:`2px solid ${d ? "var(--teal)" : "var(--border)"}`,
+                        borderRadius:10, outline:"none",
+                        background: d ? "var(--teal-light)" : "white",
+                        color:"var(--teal-dark)", transition:"all 0.15s",
+                        fontFamily:"inherit",
+                      }}
                     />
                   ))}
                 </div>
               </div>
 
-              {error && <p style={{ color: "var(--danger)", fontSize: 13, marginBottom: 12, textAlign: "center" }}>{error}</p>}
+              {error && <p style={{ color:"var(--danger)", fontSize:13, marginBottom:12, textAlign:"center" }}>{error}</p>}
 
               <button
-                type="submit"
-                style={{ ...btnStyle, opacity: (loading || otp.join("").length !== 6) ? 0.6 : 1 }}
+                style={{ ...btnPrimary, opacity:(loading || otp.join("").length !== 6) ? 0.6 : 1 }}
                 disabled={loading || otp.join("").length !== 6}
               >
-                {loading ? "Verifying..." : "Verify & Continue →"}
+                {loading ? "Verifying..." : "Verify & Login →"}
               </button>
             </form>
 
-            <div style={{ marginTop: 20, textAlign: "center", fontSize: 13 }}>
+            <div style={{ marginTop:20, textAlign:"center", fontSize:13 }}>
               {timer > 0 ? (
-                <p style={{ color: "var(--text-light)" }}>
-                  Resend in <strong style={{ color: "var(--teal)" }}>{timer}s</strong>
+                <p style={{ color:"var(--text-light)" }}>
+                  Resend OTP in <strong style={{ color:"var(--teal)" }}>{timer}s</strong>
                 </p>
               ) : (
                 <button
-                  onClick={() => resetToMode(otpPurpose === "register" ? "register" : "login")}
-                  style={{ background: "none", border: "none", color: "var(--teal)", fontWeight: 600, cursor: "pointer", fontSize: 13 }}
+                  onClick={e => handleSendOTP(e, otpMode)}
+                  style={{ background:"none", border:"none", color:"var(--teal)", fontWeight:600, cursor:"pointer", fontSize:13 }}
                 >
-                  ← Go back / Resend OTP
+                  ← Resend OTP
                 </button>
               )}
             </div>
-          </>
-        )}
 
-        {/* ════════ FORGOT MODE ════════ */}
-        {mode === "forgot" && (
-          <>
-            <h1 style={{ fontSize: 22, fontWeight: 700, color: "var(--teal-dark)", marginBottom: 4 }}>
-              Update Phone Number
-            </h1>
-            <p style={{ fontSize: 14, color: "var(--text-mid)", marginBottom: 24 }}>
-              Verify your new number via OTP to update your account
-            </p>
-
-            <form onSubmit={(e) => handleSendOTP(e, "login")}>
-              <div style={{ marginBottom: 16 }}>
-                <label style={{ display: "block", fontSize: 13, fontWeight: 500, marginBottom: 6 }}>
-                  New Mobile Number
-                </label>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <div style={{
-                    padding: "11px 14px", border: "1.5px solid var(--border)",
-                    borderRadius: 8, background: "#f8f8f8",
-                    fontSize: 14, color: "var(--text-mid)", whiteSpace: "nowrap"
-                  }}>
-                    🇮🇳 +91
-                  </div>
-                  <input
-                    style={inputStyle}
-                    type="tel"
-                    placeholder="New 10-digit number"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
-                    maxLength={10}
-                    autoFocus
-                  />
-                </div>
-              </div>
-
-              <div style={{
-                padding: "10px 14px", background: "#fff8e1",
-                borderRadius: 8, fontSize: 12, color: "#e65100",
-                border: "1px solid #ffe082", marginBottom: 16
-              }}>
-                ℹ️ OTP will be sent to your new number. Once verified, your account will be updated.
-              </div>
-
-              {error && <p style={{ color: "var(--danger)", fontSize: 13, marginBottom: 12 }}>{error}</p>}
-
-              <button type="submit" style={btnStyle} disabled={loading}>
-                {loading ? "Sending OTP..." : "Send OTP to New Number →"}
+            <div style={{ marginTop:12, textAlign:"center" }}>
+              <button onClick={() => resetMode(otpMode === "register" ? "register" : "login")}
+                style={{ background:"none", border:"none", color:"var(--text-light)", fontSize:12, cursor:"pointer" }}>
+                ← Change email
               </button>
-            </form>
+            </div>
 
-            <div style={{ marginTop: 20, textAlign: "center" }}>
-              <button onClick={() => resetToMode("login")}
-                style={{ background: "none", border: "none", color: "var(--teal)", fontWeight: 600, cursor: "pointer", fontSize: 13 }}>
-                ← Back to Login
-              </button>
+            <div style={{ marginTop:16, padding:"12px 14px", background:"#e8f4f8", borderRadius:8, fontSize:12, color:"var(--teal-dark)" }}>
+              📧 Spam folder bhi check karo agar OTP nahi aaya.
             </div>
           </>
         )}
-
       </div>
     </div>
   );

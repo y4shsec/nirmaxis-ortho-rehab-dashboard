@@ -1,101 +1,135 @@
 import {
-  RecaptchaVerifier,
-  signInWithPhoneNumber,
   signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
   signOut,
   onAuthStateChanged,
 } from "firebase/auth";
-import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
+import {
+  doc, getDoc, setDoc, serverTimestamp,
+} from "firebase/firestore";
 import { auth, db } from "./firebase";
 
-// ── Setup reCAPTCHA ──
-export function setupRecaptcha(containerId) {
-  // Clear existing verifier
-  if (window.recaptchaVerifier) {
-    try { window.recaptchaVerifier.clear(); } catch (e) {}
-    window.recaptchaVerifier = null;
-  }
+// ── In-memory OTP store (tab session only) ──
+const otpStore = {};
 
-  // Remove and recreate the container div to avoid duplicate widget error
-  const existing = document.getElementById(containerId);
-  if (existing) existing.innerHTML = "";
-
-  window.recaptchaVerifier = new RecaptchaVerifier(auth, containerId, {
-    size: "invisible",
-    callback: () => {},
-    "expired-callback": () => {
-      window.recaptchaVerifier = null;
-    },
-  });
-
-  return window.recaptchaVerifier;
+// ── Generate 6-digit OTP ──
+function generateOTP() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// ── PATIENT: Send OTP ──
-export async function sendOTP(phoneNumber) {
-  // Ensure verifier exists
-  if (!window.recaptchaVerifier) {
-    setupRecaptcha("recaptcha-anchor");
+// ── Derive a stable Firebase password from email ──
+// This is deterministic so the same patient always has same password
+function derivePassword(email) {
+  // Simple deterministic hash: base64 of reversed email + salt
+  const reversed = email.split("").reverse().join("");
+  return btoa(`nirmaxis_${reversed}_patient`).slice(0, 28) + "Nx!";
+}
+
+// ── Send OTP via EmailJS ──
+export async function sendEmailOTP(email) {
+  if (!email || !email.includes("@")) {
+    throw new Error("Please enter a valid email address.");
   }
 
+  const otp    = generateOTP();
+  const expiry = Date.now() + 10 * 60 * 1000; // 10 min expiry
+
+  // Store OTP in memory
+  otpStore[email.toLowerCase()] = { otp, expiry, email };
+
+  // Send via EmailJS
+  if (typeof window.emailjs === "undefined") {
+    throw new Error("Email service not loaded. Please refresh and try again.");
+  }
+
+  await window.emailjs.send(
+    "service_839zf7p",   // Your EmailJS service ID
+    "template_otp",      // We'll create this template
+    {
+      to_email:   email,
+      to_name:    email.split("@")[0],
+      otp_code:   otp,
+      clinic_name:"NIRMAXIS Neuro & Ortho Rehabilitation",
+      expiry_min: "10",
+    }
+  );
+
+  return true;
+}
+
+// ── Verify OTP ──
+export function verifyEmailOTP(email, enteredOTP) {
+  const key    = email.toLowerCase();
+  const stored = otpStore[key];
+
+  if (!stored) throw new Error("No OTP found. Please request a new one.");
+  if (Date.now() > stored.expiry) {
+    delete otpStore[key];
+    throw new Error("OTP expired. Please request a new one.");
+  }
+  if (stored.otp !== enteredOTP.trim()) {
+    throw new Error("Invalid OTP. Please check and try again.");
+  }
+
+  // Clear used OTP
+  delete otpStore[key];
+  return true;
+}
+
+// ── Patient: Login or Register via Email OTP ──
+export async function patientLoginWithEmail(email) {
+  const password = derivePassword(email);
+
+  // Try login first
   try {
-    const confirmation = await signInWithPhoneNumber(
-      auth,
-      phoneNumber,
-      window.recaptchaVerifier
-    );
-    window.confirmationResult = confirmation;
-    return confirmation;
-  } catch (err) {
-    // Reset verifier on failure so next attempt works
-    window.recaptchaVerifier = null;
-    throw err;
+    const result = await signInWithEmailAndPassword(auth, email, password);
+    return result.user;
+  } catch (loginErr) {
+    // If user doesn't exist → create account
+    if (
+      loginErr.code === "auth/user-not-found" ||
+      loginErr.code === "auth/invalid-credential" ||
+      loginErr.code === "auth/invalid-email"
+    ) {
+      const result = await createUserWithEmailAndPassword(auth, email, password);
+      const user   = result.user;
+
+      // Create Firestore user doc
+      await setDoc(doc(db, "users", user.uid), {
+        uid:       user.uid,
+        email:     email,
+        phone:     "",
+        name:      "",
+        role:      "patient",
+        address:   "",
+        area:      "",
+        createdAt: serverTimestamp(),
+      });
+
+      return user;
+    }
+    throw loginErr;
   }
 }
 
-// ── PATIENT: Verify OTP ──
-export async function verifyOTP(otp) {
-  if (!window.confirmationResult) {
-    throw new Error("No OTP session found. Please request OTP again.");
-  }
-
-  const result = await window.confirmationResult.confirm(otp);
-  const user = result.user;
-
-  // Create user doc if first time
-  const userRef = doc(db, "users", user.uid);
-  const userSnap = await getDoc(userRef);
-
-  if (!userSnap.exists()) {
-    await setDoc(userRef, {
-      uid: user.uid,
-      phone: user.phoneNumber,
-      name: "",
-      email: "",
-      role: "patient",
-      address: "",
-      area: "",
-      createdAt: serverTimestamp(),
-    });
-  }
-
-  return result.user;
-}
-
-// ── ADMIN: Email + Password login ──
+// ── Admin: Email + Password login ──
 export async function adminLogin(email, password) {
-  const result = await signInWithEmailAndPassword(auth, email, password);
-  const user = result.user;
-
-  const userRef = doc(db, "users", user.uid);
-  const userSnap = await getDoc(userRef);
+  const result   = await signInWithEmailAndPassword(auth, email, password);
+  const user     = result.user;
+  const userSnap = await getDoc(doc(db, "users", user.uid));
 
   if (!userSnap.exists() || userSnap.data().role !== "admin") {
     await signOut(auth);
     throw new Error("Access denied. Not an admin account.");
   }
 
-  return result.user;
+  return user;
+}
+
+// ── Admin: Forgot password ──
+export function adminForgotPassword(email) {
+  return sendPasswordResetEmail(auth, email);
 }
 
 // ── Logout ──
@@ -103,12 +137,10 @@ export function logout() {
   return signOut(auth);
 }
 
-// ── Get current user role ──
+// ── Get user role ──
 export async function getUserRole(uid) {
-  const userRef = doc(db, "users", uid);
-  const userSnap = await getDoc(userRef);
-  if (userSnap.exists()) return userSnap.data().role;
-  return null;
+  const snap = await getDoc(doc(db, "users", uid));
+  return snap.exists() ? snap.data().role : null;
 }
 
 // ── Auth state listener ──

@@ -1,13 +1,6 @@
 import {
-  collection,
-  getDocs,
-  getDoc,
-  updateDoc,
-  doc,
-  query,
-  where,
-  orderBy,
-  serverTimestamp,
+  collection, getDocs, getDoc, updateDoc,
+  doc, query, where, orderBy, serverTimestamp,
 } from "firebase/firestore";
 import { db } from "./firebase";
 
@@ -19,19 +12,19 @@ export async function getAllPatients() {
     orderBy("createdAt", "desc")
   );
   const snap = await getDocs(q);
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
 
 // ── Get single patient ──
 export async function getPatient(uid) {
-  const ref = doc(db, "users", uid);
-  const snap = await getDoc(ref);
-  if (snap.exists()) return { id: snap.id, ...snap.data() };
-  return null;
+  const snap = await getDoc(doc(db, "users", uid));
+  return snap.exists() ? { id: snap.id, ...snap.data() } : null;
 }
 
 // ── Update patient profile ──
 export async function updatePatient(uid, data) {
-  const ref = doc(db, "users", uid);
-  await updateDoc(ref, { ...data, updatedAt: serverTimestamp() });
+  await updateDoc(doc(db, "users", uid), {
+    ...data,
+    updatedAt: serverTimestamp(),
+  });
 }
